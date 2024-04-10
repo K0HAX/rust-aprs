@@ -1,8 +1,11 @@
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
+use chrono::prelude::*;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+use log::debug;
 
+#[derive(Clone)]
 pub struct SqliteDb {
     conn: Arc<Mutex<Connection>>,
 }
@@ -10,6 +13,7 @@ pub struct SqliteDb {
 impl SqliteDb {
     pub fn new(path: &str) -> Self {
         let conn = Connection::open(path).unwrap();
+        debug!("[SqliteDb::new] Connection opened.");
         SqliteDb {
             conn: Arc::new(Mutex::new(conn)),
         }
@@ -17,6 +21,10 @@ impl SqliteDb {
 
     pub fn insert_aprs_line(&self, data: &libk0hax_aprs::data::ParsedLine) -> Result<()> {
         let record_uuid = Uuid::new_v4();
+        debug!("[SqliteDb::insert_aprs_line] [{}]: {:?}", record_uuid.hyphenated().to_string(), &data);
+        let utc_now: DateTime<Utc> = Utc::now();
+        let parsed_time: String = utc_now.format("%+").to_string();
+
         let from: String = data.from.clone();
         let via: String = data
             .via
@@ -137,13 +145,14 @@ impl SqliteDb {
                 return Err(anyhow!("Unknown data type").into())
             }
         };
+        debug!("[SqliteDb::insert_aprs_line] Data Type: {:?}", &type_info);
 
         {
             let statement_text =
-                "INSERT INTO main_data (id, `from`, via, type) VALUES (?1, ?2, ?3, ?4)";
+                "INSERT INTO main_data (id, `from`, via, type, `parsed_time`) VALUES (?1, ?2, ?3, ?4, ?5)";
             let mut statement = conn.prepare_cached(statement_text)?;
             let _ =
-                statement.execute((record_uuid.hyphenated().to_string(), from, via, type_info))?;
+                statement.execute((record_uuid.hyphenated().to_string(), from, via, type_info, parsed_time.clone()))?;
         }
         Ok(())
     }
@@ -151,6 +160,7 @@ impl SqliteDb {
     pub fn create_db(&self) -> Result<()> {
         let conn_handle = Arc::clone(&self.conn);
         let conn = conn_handle.lock().unwrap();
+        debug!("[SqliteDb::create_db] Got connection lock");
 
         // Create the message table
         conn.execute(
@@ -163,6 +173,7 @@ impl SqliteDb {
             )",
             (), // empty list of parameters.
         )?;
+        debug!("[SqliteDb::create_db] Created `messages` table");
 
         // Create the position table
         conn.execute(
@@ -181,6 +192,7 @@ impl SqliteDb {
             )",
             (), // empty list of parameters.
         )?;
+        debug!("[SqliteDb::create_db] Created `position` table");
 
         // Create the Status table
         conn.execute(
@@ -192,6 +204,7 @@ impl SqliteDb {
             )",
             (), // empty list of parameters.
         )?;
+        debug!("[SqliteDb::create_db] Created `status` table");
 
         // Create the MicE table
         conn.execute(
@@ -210,6 +223,7 @@ impl SqliteDb {
             )",
             (), // empty list of parameters.
         )?;
+        debug!("[SqliteDb::create_db] Created `MicE` table");
 
         // Create the Type Lookup table
         conn.execute(
@@ -219,15 +233,18 @@ impl SqliteDb {
             )",
             (), // empty list of parameters.
         )?;
+        debug!("[SqliteDb::create_db] Created `type` table");
 
         // Populate the Type Lookup table
         {
             let tables = vec![(1, "messages"), (2, "position"), (3, "status"), (4, "MicE")];
+            debug!("[SqliteDb::create_db] prepared records to insert into `type` table: {:?}", &tables);
             let mut type_statement =
                 conn.prepare_cached("INSERT INTO `type` (id, `table`) VALUES (?1, ?2)")?;
             for table in tables {
                 type_statement.execute(table)?;
             }
+            debug!("[SqliteDb::create_db] Completed building `type` table");
         }
 
         // Create the main lookup table
@@ -236,10 +253,12 @@ impl SqliteDb {
                 id                  TEXT PRIMARY KEY,
                 `from`              TEXT NOT NULL,
                 via                 TEXT NOT NULL,
-                type                INTEGER NOT NULL
+                type                INTEGER NOT NULL,
+                `parsed_time`       TEXT
             )",
             (), // empty list of parameters.
         )?;
+        debug!("[SqliteDb::create_db] Created `main_data` table");
 
         Ok(())
     }

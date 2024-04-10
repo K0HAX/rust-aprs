@@ -1,6 +1,8 @@
 use clap::Parser;
 use clap::ValueEnum;
 use log::{error, info};
+use tokio::sync::Mutex;
+use std::sync::Arc;
 
 use std::error::Error;
 
@@ -67,6 +69,40 @@ struct Args {
     timestamp: LogTimestamp,
 }
 
+struct AsyncLine {
+    line: Arc<Mutex<libk0hax_aprs::data::ParsedLine>>,
+}
+
+impl AsyncLine {
+    fn insert_aprs_line(&self, db: SqliteDb) {
+        let line_handle = Arc::clone(&self.line);
+
+        tokio::spawn(async move {
+            let parsed_line = line_handle.lock().await; // Get exclusive access to the line
+            let db_result = db.insert_aprs_line(&parsed_line);
+            match db_result {
+                Ok(_) => info!("Parsed DB result!"),
+                Err(e) => error!("DB Result Error: {}", e),
+            }
+        });
+    }
+
+    fn print_parsed(&self) {
+        let line_handle = Arc::clone(&self.line);
+
+        tokio::spawn(async move {
+            let parsed_line = line_handle.lock().await; // Get exclusive access to the line
+            libk0hax_aprs::utils::print_parsed(&parsed_line).unwrap();
+        });
+    }
+
+    fn new(line: libk0hax_aprs::data::ParsedLine) -> Self {
+        AsyncLine {
+            line: Arc::new(Mutex::new(line)),
+        }
+    }
+}
+
 async fn main_loop(aprs_client: libk0hax_aprs::client::AprsClient, db: SqliteDb) {
     loop {
         let parsed_line = match aprs_client.read_line().await {
@@ -76,12 +112,9 @@ async fn main_loop(aprs_client: libk0hax_aprs::client::AprsClient, db: SqliteDb)
                 continue;
             }
         };
-        let db_result = db.insert_aprs_line(&parsed_line);
-        match db_result {
-            Ok(_) => info!("Parsed DB result!"),
-            Err(e) => error!("DB Result Error: {}", e),
-        }
-        libk0hax_aprs::utils::print_parsed(&parsed_line).unwrap();
+        let async_line = AsyncLine::new(parsed_line);
+        async_line.insert_aprs_line(db.clone());
+        async_line.print_parsed();
     }
 }
 

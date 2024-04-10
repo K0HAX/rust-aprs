@@ -10,6 +10,7 @@ use tokio_util::codec::{Framed, LinesCodec};
 pub struct AprsClient {
     addr: SocketAddr,
     client: Arc<RwLock<Framed<tokio::net::TcpStream, LinesCodec>>>,
+    error_count: Arc<RwLock<u64>>,
 }
 
 impl AprsClient {
@@ -33,9 +34,11 @@ impl AprsClient {
             .await
             .unwrap();
 
+        let error_count: u64 = 0;
         AprsClient {
             addr: addr,
             client: Arc::new(RwLock::new(client)),
+            error_count: Arc::new(RwLock::new(error_count)),
         }
     }
 
@@ -52,6 +55,9 @@ impl AprsClient {
                     return Err(anyhow!("Server Comment: {}", x).into());
                 }
                 _ => {
+                    let error_count_handle = Arc::clone(&self.error_count);
+                    let mut error_count = error_count_handle.write().unwrap();
+                    *error_count = 0;
                     match crate::parse_line(&x) {
                         Ok(y) => return Ok(y),
                         Err(y) => return Err(anyhow!("An error: {}; skipped. | {}", y, x).into()),
@@ -59,7 +65,15 @@ impl AprsClient {
                 }
             },
             Some(Err(x)) => Err(anyhow!("{}", x).into()),
-            None => Err(anyhow!("client_rw returned None!").into()),
+            None => {
+                let error_count_handle = Arc::clone(&self.error_count);
+                let mut error_count = error_count_handle.write().unwrap();
+                *error_count = *error_count + 1;
+                if *error_count > 100 {
+                    panic!("client_rw returned None and error_count is > 100!");
+                }
+                Err(anyhow!("client_rw returned None!").into())
+            },
         }
     }
 }
