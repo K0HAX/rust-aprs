@@ -73,7 +73,7 @@ impl AprsClient {
                     panic!("client_rw returned None and error_count is > 100!");
                 }
                 Err(anyhow!("client_rw returned None!").into())
-            },
+            }
         }
     }
 }

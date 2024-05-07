@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Result};
-use rusqlite::Connection;
 use chrono::prelude::*;
+use log::debug;
+use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use log::debug;
 
 #[derive(Clone)]
 pub struct SqliteDb {
@@ -21,7 +21,11 @@ impl SqliteDb {
 
     pub fn insert_aprs_line(&self, data: &libk0hax_aprs::data::ParsedLine) -> Result<()> {
         let record_uuid = Uuid::new_v4();
-        debug!("[SqliteDb::insert_aprs_line] [{}]: {:?}", record_uuid.hyphenated().to_string(), &data);
+        debug!(
+            "[SqliteDb::insert_aprs_line] [{}]: {:?}",
+            record_uuid.hyphenated().to_string(),
+            &data
+        );
         let utc_now: DateTime<Utc> = Utc::now();
         let parsed_time: String = utc_now.format("%+").to_string();
 
@@ -151,8 +155,13 @@ impl SqliteDb {
             let statement_text =
                 "INSERT INTO main_data (id, `from`, via, type, `parsed_time`) VALUES (?1, ?2, ?3, ?4, ?5)";
             let mut statement = conn.prepare_cached(statement_text)?;
-            let _ =
-                statement.execute((record_uuid.hyphenated().to_string(), from, via, type_info, parsed_time.clone()))?;
+            let _ = statement.execute((
+                record_uuid.hyphenated().to_string(),
+                from,
+                via,
+                type_info,
+                parsed_time.clone(),
+            ))?;
         }
         Ok(())
     }
@@ -238,7 +247,10 @@ impl SqliteDb {
         // Populate the Type Lookup table
         {
             let tables = vec![(1, "messages"), (2, "position"), (3, "status"), (4, "MicE")];
-            debug!("[SqliteDb::create_db] prepared records to insert into `type` table: {:?}", &tables);
+            debug!(
+                "[SqliteDb::create_db] prepared records to insert into `type` table: {:?}",
+                &tables
+            );
             let mut type_statement =
                 conn.prepare_cached("INSERT INTO `type` (id, `table`) VALUES (?1, ?2)")?;
             for table in tables {
