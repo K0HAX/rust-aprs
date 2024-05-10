@@ -38,10 +38,17 @@ pub fn parse_line(data: &str) -> Result<ParsedLine, Box<dyn Error>> {
             aprs_parser::Via::QConstruct(x) => format!("{}", x.as_textual()),
         });
     }
+    let result_data: ParsedAprsData = match ParsedAprsData::from(result.data) {
+        ParsedAprsData::Position(x) => ParsedAprsData::Position(x),
+        ParsedAprsData::Message(x) => ParsedAprsData::Message(x),
+        ParsedAprsData::Status(x) => ParsedAprsData::Status(x),
+        ParsedAprsData::MicE(x) => ParsedAprsData::MicE(x),
+        ParsedAprsData::Unknown(x) => ParsedAprsData::Unknown(format!("{}", data)),
+    };
     Ok(ParsedLine {
         from: result.from.to_string(),
         via: via_strings,
-        data: result.data.into(),
+        data: result_data.into(),
     })
 }
 

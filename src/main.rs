@@ -178,10 +178,12 @@ async fn db_loop(
     db: SqliteDb,
     rx: Arc<RwLock<mpsc::Receiver<AsyncLine>>>,
     counter_arc: Arc<RwLock<u64>>,
+    error_counter_arc: Arc<RwLock<u64>>,
 ) {
     let mut handles = Vec::new();
     for i in 0..3 {
         let counter_outer = counter_arc.clone();
+        let err_counter_outer = error_counter_arc.clone();
         let db_outer = db.clone();
         let rx_outer = rx.clone();
         handles.push((
@@ -197,6 +199,7 @@ async fn db_loop(
                 } {
                     let db_inner = db_inner.clone();
                     let counter_job = counter_outer.clone();
+                    let err_counter_job = err_counter_outer.clone();
                     let parsed_line = async_line.line.lock().await;
                     let db_result = db_inner.insert_aprs_line(&parsed_line);
                     match db_result {
@@ -207,7 +210,7 @@ async fn db_loop(
                             drop(counter);
                         }
                         Err(e) => {
-                            let mut counter = counter_job.write().await;
+                            let mut counter = err_counter_job.write().await;
                             *counter += 1;
                             drop(counter);
                             error!("DB Result Error: {}", e)
@@ -231,10 +234,12 @@ async fn mysql_loop(
     database: String,
     rx: Arc<RwLock<mpsc::Receiver<AsyncLine>>>,
     counter_arc: Arc<RwLock<u64>>,
+    err_counter_arc: Arc<RwLock<u64>>,
 ) {
     let mut handles = Vec::new();
     for i in 0..3 {
         let counter_outer = counter_arc.clone();
+        let err_counter_outer = err_counter_arc.clone();
         let host_inner = hostname.clone();
         let user_inner = username.clone();
         let pass_inner = password.clone();
@@ -253,6 +258,7 @@ async fn mysql_loop(
                     x
                 } {
                     let counter_job = counter_outer.clone();
+                    let err_counter_job = err_counter_outer.clone();
                     let parsed_line = async_line.line.lock().await;
                     let db_result = db_inner.insert_aprs_line(&parsed_line).await;
                     match db_result {
@@ -263,7 +269,7 @@ async fn mysql_loop(
                             drop(counter);
                         }
                         Err(e) => {
-                            let mut counter = counter_job.write().await;
+                            let mut counter = err_counter_job.write().await;
                             *counter += 1;
                             drop(counter);
                             error!("DB Result Error: {}", e)
@@ -275,13 +281,16 @@ async fn mysql_loop(
     }
 }
 
-async fn log_loop(parse_counter_arc: Arc<RwLock<u64>>, insert_counter_arc: Arc<RwLock<u64>>) {
+async fn log_loop(parse_counter_arc: Arc<RwLock<u64>>, insert_counter_arc: Arc<RwLock<u64>>, err_counter_arc: Arc<RwLock<u64>>) {
     loop {
         let parse_counter = parse_counter_arc.read().await;
         let insert_counter = insert_counter_arc.read().await;
-        println!("Parsed: {} | Inserted: {}", parse_counter, insert_counter);
+        let err_counter = err_counter_arc.read().await;
+        let total_combined = *insert_counter + *err_counter;
+        println!("Parsed: {} | Inserted: {} | Failed: {} | Total Insert + Failed: {}", parse_counter, insert_counter, err_counter, total_combined);
         drop(parse_counter);
         drop(insert_counter);
+        drop(err_counter);
         sleep(Duration::from_secs(60)).await;
     }
 }
@@ -336,10 +345,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create counters
     let parse_counter = Arc::new(RwLock::new(0u64));
     let insert_counter = Arc::new(RwLock::new(0u64));
+    let error_counter = Arc::new(RwLock::new(0u64));
 
     let db_rx_arc = Arc::new(RwLock::new(db_rx));
 
     let sql_insert_counter = insert_counter.clone();
+    let sql_error_counter = error_counter.clone();
 
     let mut handles = Vec::new();
 
@@ -350,7 +361,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let db = SqliteDb::new(db_path);
             let _ = db.create_db();
             handles.push(tokio::spawn(async move {
-                db_loop(db, db_rx_arc, sql_insert_counter).await;
+                db_loop(db, db_rx_arc, sql_insert_counter, sql_error_counter).await;
             }));
         }
         DatabaseMode::Mariadb(db_settings) => {
@@ -376,6 +387,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     db_database,
                     db_rx_arc,
                     sql_insert_counter,
+                    sql_error_counter
                 )
                 .await;
             }));
@@ -384,9 +396,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let log_parse_counter = parse_counter.clone();
     let log_insert_counter = insert_counter.clone();
+    let log_error_counter = error_counter.clone();
     // Begin print Loop!
     tokio::spawn(async move {
-        log_loop(log_parse_counter, log_insert_counter).await;
+        log_loop(log_parse_counter, log_insert_counter, log_error_counter).await;
     });
 
     let main_parse_counter = parse_counter.clone();
@@ -399,9 +412,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     {
         let parse_counter = parse_counter.read().await;
         let insert_counter = insert_counter.read().await;
-        println!("Parsed: {} | Inserted: {}", parse_counter, insert_counter);
+        let err_counter = error_counter.read().await;
+        let total_combined = *insert_counter + *err_counter;
+        println!("Parsed: {} | Inserted: {} | Failed: {} | Total Insert + Failed: {}", parse_counter, insert_counter, err_counter, total_combined);
         drop(parse_counter);
         drop(insert_counter);
+        drop(err_counter);
     }
 
     Ok(())

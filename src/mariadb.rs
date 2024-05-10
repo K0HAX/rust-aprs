@@ -134,8 +134,16 @@ impl ConnectionArc {
                     .await?;
                 4
             }
-            libk0hax_aprs::data::ParsedAprsData::Unknown(_x) => {
-                return Err(anyhow!("Unknown data type").into())
+            libk0hax_aprs::data::ParsedAprsData::Unknown(x) => {
+                let statement_text = "INSERT INTO `unknown` (`id`, `data`) VALUES (?, ?)";
+                let statement = sqlx::query(statement_text);
+                let conn = &mut self.conn;
+                let _ = statement
+                    .bind(record_uuid.hyphenated().to_string())
+                    .bind(x)
+                    .execute(conn)
+                    .await?;
+                5
             }
         };
         debug!("[MariaDB::insert_aprs_line] Data Type: {:?}", &type_info);
@@ -164,7 +172,7 @@ impl ConnectionArc {
         // Drop the tables if they exist
         {
             let statement_text =
-                "DROP TABLE IF EXISTS MicE, main_data, messages, position, status, type;";
+                "DROP TABLE IF EXISTS MicE, main_data, messages, position, status, unknown, type;";
             let statement = sqlx::query(statement_text);
             let _ = statement.execute(&mut *tx).await?;
         }
@@ -176,7 +184,7 @@ impl ConnectionArc {
                 `to`        TEXT NOT NULL,
                 `addressee` TEXT NOT NULL,
                 `text`      TEXT NOT NULL,
-                `msg_id`    INTEGER
+                `msg_id`    TEXT
             )";
             let statement = sqlx::query(statement_text);
             let _ = statement.execute(&mut *tx).await?;
@@ -232,6 +240,16 @@ impl ConnectionArc {
             let _ = statement.execute(&mut *tx).await?;
         }
 
+        // Create the `unknown` table
+        {
+            let statement_text = "CREATE TABLE `unknown` (
+                `id`                  CHAR(36) NOT NULL PRIMARY KEY,
+                `data`                TEXT
+            )";
+            let statement = sqlx::query(statement_text);
+            let _ = statement.execute(&mut *tx).await?;
+        }
+
         // Create the Type Lookup table
         {
             let statement_text = "CREATE TABLE `type` (
@@ -244,7 +262,7 @@ impl ConnectionArc {
 
         // Populate the Type Lookup table
         {
-            let tables = vec![(1, "messages"), (2, "position"), (3, "status"), (4, "MicE")];
+            let tables = vec![(1, "messages"), (2, "position"), (3, "status"), (4, "MicE"), (5, "unknown")];
             debug!(
                 "[MariaDb::create_db] prepared records to insert into `type` table: {:?}",
                 &tables
