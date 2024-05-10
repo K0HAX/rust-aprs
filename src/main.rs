@@ -1,5 +1,4 @@
-use clap::Parser;
-use clap::ValueEnum;
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use ctrlc;
 use log::{error, info};
 use std::sync::Arc;
@@ -13,6 +12,8 @@ use anyhow::Result;
 
 mod sqlite;
 use sqlite::SqliteDb;
+
+mod mariadb;
 
 /// Timestamp enum for logging
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -53,8 +54,8 @@ pub enum LogTimestamp {
 /// You should have received a copy of the GNU General Public License
 /// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #[derive(Parser, Debug)]
-#[command(version, about, verbatim_doc_comment)]
-struct Args {
+#[clap(version, about, verbatim_doc_comment)]
+struct Cli {
     /// Callsign to connect using
     callsign: String,
 
@@ -69,6 +70,36 @@ struct Args {
     /// Prepend log lines with a timestamp
     #[arg(short, long, default_value_t = LogTimestamp::none, value_enum)]
     timestamp: LogTimestamp,
+
+    /// Database Mode
+    #[command(subcommand)]
+    database_mode: DatabaseMode,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Subcommand, Debug)]
+enum DatabaseMode {
+    /// Save data in Sqlite3
+    Sqlite3,
+
+    /// Save data in MariaDB
+    Mariadb(MariaDbSettings),
+}
+
+#[derive(Args, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct MariaDbSettings {
+    /// MariaDB Host
+    host: String,
+
+    /// MariaDB Username
+    username: String,
+
+    /// MariaDB Database
+    #[arg(default_value = "aprs")]
+    database: String,
+
+    /// Drop (if exists) and create tables
+    #[clap(long, short, action=ArgAction::SetTrue)]
+    create_tables: bool,
 }
 
 #[derive(Clone)]
@@ -193,6 +224,57 @@ async fn db_loop(
     }
 }
 
+async fn mysql_loop(
+    hostname: String,
+    username: String,
+    password: String,
+    database: String,
+    rx: Arc<RwLock<mpsc::Receiver<AsyncLine>>>,
+    counter_arc: Arc<RwLock<u64>>,
+) {
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let counter_outer = counter_arc.clone();
+        let host_inner = hostname.clone();
+        let user_inner = username.clone();
+        let pass_inner = password.clone();
+        let db_inner = database.clone();
+        let rx_outer = rx.clone();
+        handles.push((
+            i,
+            tokio::spawn(async move {
+                let mut db_inner =
+                    mariadb::ConnectionArc::new(host_inner, user_inner, pass_inner, db_inner).await;
+                while let Some(async_line) = {
+                    let rx_inner = rx_outer.clone();
+                    let mut rx = rx_inner.write().await;
+                    let x = rx.recv().await;
+                    drop(rx);
+                    x
+                } {
+                    let counter_job = counter_outer.clone();
+                    let parsed_line = async_line.line.lock().await;
+                    let db_result = db_inner.insert_aprs_line(&parsed_line).await;
+                    match db_result {
+                        Ok(_) => {
+                            info!("Parsed DB result!");
+                            let mut counter = counter_job.write().await;
+                            *counter += 1;
+                            drop(counter);
+                        }
+                        Err(e) => {
+                            let mut counter = counter_job.write().await;
+                            *counter += 1;
+                            drop(counter);
+                            error!("DB Result Error: {}", e)
+                        }
+                    }
+                }
+            }),
+        ));
+    }
+}
+
 async fn log_loop(parse_counter_arc: Arc<RwLock<u64>>, insert_counter_arc: Arc<RwLock<u64>>) {
     loop {
         let parse_counter = parse_counter_arc.read().await;
@@ -207,7 +289,7 @@ async fn log_loop(parse_counter_arc: Arc<RwLock<u64>>, insert_counter_arc: Arc<R
 #[tokio::main]
 #[allow(unreachable_code)]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+    let args = Cli::parse();
     // Set up logging
     let verbose = args.verbosity as usize;
     let quiet = args.quiet;
@@ -246,9 +328,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let client_hostname = "rotate.aprs.net";
     let client_port: u16 = 10152;
 
-    let db_path = "aprs.sqlite";
-    let db = SqliteDb::new(db_path);
-    let _ = db.create_db();
     let my_client =
         libk0hax_aprs::client::AprsClient::new(client_hostname, client_port, &my_callsign).await;
 
@@ -265,9 +344,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut handles = Vec::new();
 
     // Begin SQL Loop!
-    handles.push(tokio::spawn(async move {
-        db_loop(db, db_rx_arc, sql_insert_counter).await;
-    }));
+    match &args.database_mode {
+        DatabaseMode::Sqlite3 => {
+            let db_path = "aprs.sqlite";
+            let db = SqliteDb::new(db_path);
+            let _ = db.create_db();
+            handles.push(tokio::spawn(async move {
+                db_loop(db, db_rx_arc, sql_insert_counter).await;
+            }));
+        }
+        DatabaseMode::Mariadb(db_settings) => {
+            let db_host = db_settings.host.clone();
+            let db_user = db_settings.username.clone();
+            let db_password = rpassword::prompt_password("MySQL Password: ")?;
+            let db_database = db_settings.database.clone();
+            if db_settings.create_tables == true {
+                let mut conn = mariadb::ConnectionArc::new(
+                    db_host.clone(),
+                    db_user.clone(),
+                    db_password.clone(),
+                    db_database.clone(),
+                )
+                .await;
+                conn.create_tables().await?;
+            }
+            handles.push(tokio::spawn(async move {
+                mysql_loop(
+                    db_host,
+                    db_user,
+                    db_password,
+                    db_database,
+                    db_rx_arc,
+                    sql_insert_counter,
+                )
+                .await;
+            }));
+        }
+    }
 
     let log_parse_counter = parse_counter.clone();
     let log_insert_counter = insert_counter.clone();

@@ -43,6 +43,38 @@ impl Timestamp {
             Timestamp::Unsupported(_) => "".to_string(),
         }
     }
+
+    pub fn mariadb_string(&self) -> String {
+        let utc_now: DateTime<Utc> = Utc::now();
+        let cur_year = utc_now.year();
+        let cur_month = utc_now.month();
+        let cur_day = utc_now.day();
+
+        match self {
+            Timestamp::DDHHMM(x, y, z) => {
+                let dt_string = format!("{}-{} {}:{}:00 +0000", cur_year, x, y, z);
+                let format_string = "%Y-%j %H:%M:%S %z";
+                match DateTime::parse_from_str(&dt_string, format_string) {
+                    // YYYY-MM-DD HH:MM:SS
+                    Ok(x) => x.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                    Err(_e) => "".to_string(),
+                }
+            }
+            Timestamp::HHMMSS(x, y, z) => {
+                let dt_string = format!(
+                    "{}-{}-{} {}:{}:{} +0000",
+                    cur_year, cur_month, cur_day, x, y, z
+                );
+                let format_string = "%Y-%m-%d %H:%M:%S %z";
+                match DateTime::parse_from_str(&dt_string, format_string) {
+                    // YYYY-MM-DD HH:MM:SS
+                    Ok(x) => x.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                    Err(_e) => "".to_string(),
+                }
+            }
+            Timestamp::Unsupported(_) => "".to_string(),
+        }
+    }
 }
 
 impl From<aprs_parser::Timestamp> for Timestamp {
